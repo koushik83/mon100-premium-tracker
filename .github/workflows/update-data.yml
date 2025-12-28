@@ -1,0 +1,70 @@
+name: Update Premium Data
+
+on:
+  # Run daily at 4:30 PM IST (11:00 AM UTC) - after Indian market closes
+  schedule:
+    - cron: '0 11 * * 1-5'  # Monday to Friday
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+  # Run on push to main branch (for initial deployment)
+  push:
+    branches:
+      - main
+    paths:
+      - 'fetch_premium_data.py'
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance requests pandas numpy
+
+      - name: Fetch premium data
+        run: python fetch_premium_data.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # Check if there are changes
+          if git diff --quiet premium_data.json; then
+            echo "No changes to premium_data.json"
+          else
+            git add premium_data.json
+            git commit -m "Update premium data - $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Data Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f premium_data.json ]; then
+            echo "✅ Premium data updated successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Last Updated:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            # Extract current premium from JSON
+            CURRENT=$(python -c "import json; data=json.load(open('premium_data.json')); print(f\"{data['stats']['current']:.2f}%\")")
+            echo "**Current Premium:** ${CURRENT}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Failed to generate premium_data.json" >> $GITHUB_STEP_SUMMARY
+          fi

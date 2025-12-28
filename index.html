@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MON100 Premium Tracker</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#6366f1',
+                        secondary: '#8b5cf6',
+                        success: '#22c55e',
+                        warning: '#eab308',
+                        danger: '#ef4444',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* Custom scrollbar for dark mode */
+        .dark ::-webkit-scrollbar { width: 8px; }
+        .dark ::-webkit-scrollbar-track { background: #1f2937; }
+        .dark ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .dark ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+
+        /* Smooth transitions */
+        * { transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease; }
+
+        /* Chart container */
+        .chart-container { position: relative; height: 400px; width: 100%; }
+        @media (min-width: 768px) { .chart-container { height: 500px; } }
+
+        /* Loading spinner */
+        .spinner {
+            border: 3px solid transparent;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Stat card hover effect */
+        .stat-card { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .stat-card:hover { transform: translateY(-2px); }
+    </style>
+</head>
+<body class="dark bg-gray-900 text-gray-100 min-h-screen">
+
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+            <div>
+                <h1 class="text-xl md:text-2xl font-bold text-white flex items-center gap-2">
+                    <span class="text-primary">MON100</span> Premium Tracker
+                </h1>
+                <p id="last-updated" class="text-sm text-gray-400 mt-1">Loading...</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <!-- Dark Mode Toggle -->
+                <button id="theme-toggle" class="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-primary" title="Toggle theme">
+                    <svg id="sun-icon" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd"/>
+                    </svg>
+                    <svg id="moon-icon" class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+
+        <!-- Loading State -->
+        <div id="loading" class="flex flex-col items-center justify-center py-20">
+            <div class="spinner mb-4"></div>
+            <p class="text-gray-400">Loading premium data...</p>
+        </div>
+
+        <!-- Error State -->
+        <div id="error" class="hidden bg-red-900/50 border border-red-700 rounded-lg p-6 text-center">
+            <svg class="w-12 h-12 mx-auto text-red-500 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <h3 class="text-xl font-semibold text-red-400 mb-2">Failed to Load Data</h3>
+            <p id="error-message" class="text-gray-400">Please try refreshing the page.</p>
+        </div>
+
+        <!-- Content (hidden until loaded) -->
+        <div id="content" class="hidden">
+
+            <!-- Current Premium Hero -->
+            <div id="current-premium-card" class="bg-gradient-to-r from-gray-800 to-gray-750 rounded-xl p-6 mb-6 border border-gray-700">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                    <div>
+                        <p class="text-gray-400 text-sm uppercase tracking-wide mb-1">Current Premium</p>
+                        <div class="flex items-baseline gap-2">
+                            <span id="current-premium" class="text-4xl md:text-5xl font-bold">--</span>
+                            <span class="text-2xl text-gray-400">%</span>
+                        </div>
+                        <p id="premium-status" class="mt-2 text-sm"></p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <div class="bg-gray-700/50 rounded-lg px-4 py-2">
+                            <p class="text-xs text-gray-400">Price</p>
+                            <p id="current-price" class="text-lg font-semibold">--</p>
+                        </div>
+                        <div class="bg-gray-700/50 rounded-lg px-4 py-2">
+                            <p class="text-xs text-gray-400">iNAV</p>
+                            <p id="current-nav" class="text-lg font-semibold">--</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statistics Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">Minimum</p>
+                    <p id="stat-min" class="text-xl font-bold text-success">--</p>
+                </div>
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">Maximum</p>
+                    <p id="stat-max" class="text-xl font-bold text-danger">--</p>
+                </div>
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">Average</p>
+                    <p id="stat-avg" class="text-xl font-bold text-primary">--</p>
+                </div>
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">Median</p>
+                    <p id="stat-median" class="text-xl font-bold text-secondary">--</p>
+                </div>
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">25th %ile</p>
+                    <p id="stat-p25" class="text-xl font-bold text-gray-300">--</p>
+                </div>
+                <div class="stat-card bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <p class="text-xs text-gray-400 uppercase tracking-wide">75th %ile</p>
+                    <p id="stat-p75" class="text-xl font-bold text-gray-300">--</p>
+                </div>
+            </div>
+
+            <!-- Chart Controls -->
+            <div class="flex flex-wrap justify-between items-center gap-4 mb-4">
+                <!-- Date Range Selector -->
+                <div class="flex flex-wrap gap-2">
+                    <button data-range="1M" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600">1M</button>
+                    <button data-range="3M" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600">3M</button>
+                    <button data-range="6M" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600">6M</button>
+                    <button data-range="1Y" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600">1Y</button>
+                    <button data-range="2Y" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600">2Y</button>
+                    <button data-range="ALL" class="range-btn px-3 py-1.5 rounded-lg text-sm font-medium bg-primary text-white">ALL</button>
+                </div>
+
+                <!-- Zoom Controls -->
+                <div class="flex gap-2">
+                    <button id="reset-zoom" class="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600 flex items-center gap-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Reset Zoom
+                    </button>
+                </div>
+            </div>
+
+            <!-- Chart Container -->
+            <div class="bg-gray-800 rounded-xl p-4 border border-gray-700 mb-6">
+                <div class="chart-container">
+                    <canvas id="premium-chart"></canvas>
+                </div>
+                <p class="text-xs text-gray-500 text-center mt-4">
+                    Scroll to zoom | Drag to pan | Double-click to reset
+                </p>
+            </div>
+
+            <!-- Legend / Info -->
+            <div class="bg-gray-800 rounded-xl p-4 border border-gray-700">
+                <h3 class="font-semibold mb-3">Premium Zones</h3>
+                <div class="flex flex-wrap gap-4 text-sm">
+                    <div class="flex items-center gap-2">
+                        <span class="w-4 h-4 rounded bg-green-500"></span>
+                        <span>Below 2% - Buy Zone</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="w-4 h-4 rounded bg-yellow-500"></span>
+                        <span>2% - 4% - Neutral</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="w-4 h-4 rounded bg-red-500"></span>
+                        <span>Above 4% - Avoid</span>
+                    </div>
+                </div>
+                <div class="mt-4 text-xs text-gray-500">
+                    <p><strong>Premium Calculation:</strong> ((Market Price - Adjusted iNAV) / Adjusted iNAV) × 100</p>
+                    <p><strong>Adjusted iNAV:</strong> Official NAV × (Current USDINR / NAV day USDINR)</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 border-t border-gray-700 mt-12 py-6">
+        <div class="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
+            <p>Data sourced from Yahoo Finance and mfapi.in</p>
+            <p class="mt-1">MON100 = Motilal Oswal NASDAQ 100 ETF</p>
+        </div>
+    </footer>
+
+    <script>
+        // Global state
+        let premiumData = null;
+        let chart = null;
+        let isDarkMode = true;
+
+        // DOM Elements
+        const elements = {
+            loading: document.getElementById('loading'),
+            error: document.getElementById('error'),
+            errorMessage: document.getElementById('error-message'),
+            content: document.getElementById('content'),
+            lastUpdated: document.getElementById('last-updated'),
+            currentPremium: document.getElementById('current-premium'),
+            currentPremiumCard: document.getElementById('current-premium-card'),
+            premiumStatus: document.getElementById('premium-status'),
+            currentPrice: document.getElementById('current-price'),
+            currentNav: document.getElementById('current-nav'),
+            statMin: document.getElementById('stat-min'),
+            statMax: document.getElementById('stat-max'),
+            statAvg: document.getElementById('stat-avg'),
+            statMedian: document.getElementById('stat-median'),
+            statP25: document.getElementById('stat-p25'),
+            statP75: document.getElementById('stat-p75'),
+            themeToggle: document.getElementById('theme-toggle'),
+            sunIcon: document.getElementById('sun-icon'),
+            moonIcon: document.getElementById('moon-icon'),
+            resetZoom: document.getElementById('reset-zoom'),
+            rangeButtons: document.querySelectorAll('.range-btn')
+        };
+
+        // Theme Toggle
+        function toggleTheme() {
+            isDarkMode = !isDarkMode;
+            document.documentElement.classList.toggle('dark', isDarkMode);
+            elements.sunIcon.classList.toggle('hidden', isDarkMode);
+            elements.moonIcon.classList.toggle('hidden', !isDarkMode);
+
+            // Update chart colors
+            if (chart) {
+                updateChartTheme();
+            }
+
+            // Save preference
+            localStorage.setItem('darkMode', isDarkMode);
+        }
+
+        function updateChartTheme() {
+            const textColor = isDarkMode ? '#9ca3af' : '#4b5563';
+            const gridColor = isDarkMode ? '#374151' : '#e5e7eb';
+
+            chart.options.scales.x.ticks.color = textColor;
+            chart.options.scales.y.ticks.color = textColor;
+            chart.options.scales.x.grid.color = gridColor;
+            chart.options.scales.y.grid.color = gridColor;
+            chart.options.plugins.legend.labels.color = textColor;
+
+            chart.update('none');
+        }
+
+        // Load theme from localStorage
+        function loadTheme() {
+            const savedDarkMode = localStorage.getItem('darkMode');
+            if (savedDarkMode !== null) {
+                isDarkMode = savedDarkMode === 'true';
+            }
+            document.documentElement.classList.toggle('dark', isDarkMode);
+            elements.sunIcon.classList.toggle('hidden', isDarkMode);
+            elements.moonIcon.classList.toggle('hidden', !isDarkMode);
+        }
+
+        // Format number with sign
+        function formatPremium(value) {
+            const prefix = value >= 0 ? '+' : '';
+            return `${prefix}${value.toFixed(2)}%`;
+        }
+
+        // Get premium color based on value
+        function getPremiumColor(value) {
+            if (value < 2) return '#22c55e';  // green
+            if (value < 4) return '#eab308';  // yellow
+            return '#ef4444';  // red
+        }
+
+        // Get premium status text
+        function getPremiumStatus(value) {
+            if (value < 2) {
+                return { text: 'Below target threshold - Good time to buy', class: 'text-success' };
+            } else if (value < 4) {
+                return { text: 'Moderate premium - Consider waiting', class: 'text-warning' };
+            } else {
+                return { text: 'High premium - Best to avoid buying now', class: 'text-danger' };
+            }
+        }
+
+        // Filter data by date range
+        function filterDataByRange(data, range) {
+            if (range === 'ALL') return data;
+
+            const now = new Date();
+            let cutoffDate;
+
+            switch(range) {
+                case '1M':
+                    cutoffDate = new Date(now.setMonth(now.getMonth() - 1));
+                    break;
+                case '3M':
+                    cutoffDate = new Date(now.setMonth(now.getMonth() - 3));
+                    break;
+                case '6M':
+                    cutoffDate = new Date(now.setMonth(now.getMonth() - 6));
+                    break;
+                case '1Y':
+                    cutoffDate = new Date(now.setFullYear(now.getFullYear() - 1));
+                    break;
+                case '2Y':
+                    cutoffDate = new Date(now.setFullYear(now.getFullYear() - 2));
+                    break;
+                default:
+                    return data;
+            }
+
+            const filteredIndices = [];
+            data.dates.forEach((date, index) => {
+                if (new Date(date) >= cutoffDate) {
+                    filteredIndices.push(index);
+                }
+            });
+
+            return {
+                dates: filteredIndices.map(i => data.dates[i]),
+                premiums: filteredIndices.map(i => data.premiums[i]),
+                prices: filteredIndices.map(i => data.prices[i]),
+                navs: filteredIndices.map(i => data.navs[i]),
+                adjusted_inavs: filteredIndices.map(i => data.adjusted_inavs[i])
+            };
+        }
+
+        // Create gradient for the chart line
+        function createGradient(ctx, chartArea) {
+            const gradient = ctx.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
+            gradient.addColorStop(0, 'rgba(34, 197, 94, 0.8)');    // green at bottom
+            gradient.addColorStop(0.4, 'rgba(234, 179, 8, 0.8)');  // yellow in middle
+            gradient.addColorStop(1, 'rgba(239, 68, 68, 0.8)');    // red at top
+            return gradient;
+        }
+
+        // Initialize chart
+        function initChart(data) {
+            const ctx = document.getElementById('premium-chart').getContext('2d');
+
+            // Prepare data points with color based on premium value
+            const dataPoints = data.dates.map((date, i) => ({
+                x: new Date(date),
+                y: data.premiums[i]
+            }));
+
+            // Calculate segment colors based on premium values
+            const segmentColors = data.premiums.map(p => getPremiumColor(p));
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Premium %',
+                            data: dataPoints,
+                            borderColor: function(context) {
+                                const chart = context.chart;
+                                const {ctx, chartArea} = chart;
+                                if (!chartArea) return '#6366f1';
+                                return createGradient(ctx, chartArea);
+                            },
+                            backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            pointHoverBackgroundColor: '#6366f1',
+                            pointHoverBorderColor: '#fff',
+                            pointHoverBorderWidth: 2,
+                            fill: true,
+                            tension: 0.1,
+                            segment: {
+                                borderColor: ctx => getPremiumColor(ctx.p0.parsed.y)
+                            }
+                        },
+                        {
+                            label: '2% Target',
+                            data: data.dates.map(date => ({ x: new Date(date), y: 2 })),
+                            borderColor: '#6366f1',
+                            borderWidth: 2,
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'month',
+                                displayFormats: {
+                                    month: 'MMM yyyy'
+                                }
+                            },
+                            ticks: {
+                                color: '#9ca3af',
+                                maxRotation: 45
+                            },
+                            grid: {
+                                color: '#374151',
+                                drawBorder: false
+                            }
+                        },
+                        y: {
+                            ticks: {
+                                color: '#9ca3af',
+                                callback: value => value.toFixed(1) + '%'
+                            },
+                            grid: {
+                                color: '#374151',
+                                drawBorder: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: '#9ca3af',
+                                usePointStyle: true,
+                                padding: 20
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(17, 24, 39, 0.95)',
+                            titleColor: '#f9fafb',
+                            bodyColor: '#d1d5db',
+                            borderColor: '#374151',
+                            borderWidth: 1,
+                            padding: 12,
+                            displayColors: false,
+                            callbacks: {
+                                title: (items) => {
+                                    if (!items.length) return '';
+                                    const date = new Date(items[0].parsed.x);
+                                    return date.toLocaleDateString('en-US', {
+                                        weekday: 'short',
+                                        year: 'numeric',
+                                        month: 'short',
+                                        day: 'numeric'
+                                    });
+                                },
+                                label: (context) => {
+                                    if (context.datasetIndex === 1) return null; // Skip target line
+                                    const index = premiumData.dates.indexOf(
+                                        context.parsed.x ? new Date(context.parsed.x).toISOString().split('T')[0] : null
+                                    );
+
+                                    // Find the matching index by date
+                                    const dateStr = new Date(context.parsed.x).toISOString().split('T')[0];
+                                    const dataIndex = premiumData.dates.findIndex(d => d === dateStr);
+
+                                    if (dataIndex === -1) return [`Premium: ${context.parsed.y.toFixed(2)}%`];
+
+                                    const premium = premiumData.premiums[dataIndex];
+                                    const price = premiumData.prices[dataIndex];
+                                    const nav = premiumData.adjusted_inavs ? premiumData.adjusted_inavs[dataIndex] : premiumData.navs[dataIndex];
+
+                                    return [
+                                        `Premium: ${premium >= 0 ? '+' : ''}${premium.toFixed(2)}%`,
+                                        `Price: ₹${price.toFixed(2)}`,
+                                        `iNAV: ₹${nav.toFixed(2)}`
+                                    ];
+                                }
+                            }
+                        },
+                        zoom: {
+                            pan: {
+                                enabled: true,
+                                mode: 'x'
+                            },
+                            zoom: {
+                                wheel: {
+                                    enabled: true
+                                },
+                                pinch: {
+                                    enabled: true
+                                },
+                                mode: 'x',
+                                onZoomComplete: () => {
+                                    // Could add logic here if needed
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update chart with new data range
+        function updateChartRange(range) {
+            const filteredData = filterDataByRange(premiumData, range);
+
+            const dataPoints = filteredData.dates.map((date, i) => ({
+                x: new Date(date),
+                y: filteredData.premiums[i]
+            }));
+
+            const targetPoints = filteredData.dates.map(date => ({
+                x: new Date(date),
+                y: 2
+            }));
+
+            // Update data
+            chart.data.datasets[0].data = dataPoints;
+            chart.data.datasets[1].data = targetPoints;
+
+            // Set appropriate time unit based on range
+            let timeUnit = 'month';
+            if (range === '1M') timeUnit = 'week';
+            else if (range === '3M') timeUnit = 'week';
+            else if (range === '6M') timeUnit = 'month';
+            else timeUnit = 'month';
+
+            chart.options.scales.x.time.unit = timeUnit;
+
+            // Set x-axis min/max to fit the filtered data exactly
+            if (filteredData.dates.length > 0) {
+                const minDate = new Date(filteredData.dates[0]);
+                const maxDate = new Date(filteredData.dates[filteredData.dates.length - 1]);
+                // Add small padding (1 day on each side)
+                minDate.setDate(minDate.getDate() - 1);
+                maxDate.setDate(maxDate.getDate() + 1);
+                chart.options.scales.x.min = minDate.getTime();
+                chart.options.scales.x.max = maxDate.getTime();
+            }
+
+            // Reset zoom first, then update
+            chart.resetZoom();
+            chart.update('none');
+
+            // Update active button
+            elements.rangeButtons.forEach(btn => {
+                btn.classList.remove('bg-primary', 'text-white');
+                btn.classList.add('bg-gray-700');
+                if (btn.dataset.range === range) {
+                    btn.classList.add('bg-primary', 'text-white');
+                    btn.classList.remove('bg-gray-700');
+                }
+            });
+        }
+
+        // Update UI with data
+        function updateUI(data) {
+            // Last updated
+            const lastUpdated = new Date(data.last_updated);
+            elements.lastUpdated.textContent = `Last Updated: ${lastUpdated.toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            })}`;
+
+            // Current values
+            const currentPremium = data.stats.current;
+            const currentPrice = data.prices[data.prices.length - 1];
+            const currentNav = data.adjusted_inavs ? data.adjusted_inavs[data.adjusted_inavs.length - 1] : data.navs[data.navs.length - 1];
+
+            elements.currentPremium.textContent = currentPremium >= 0 ? `+${currentPremium.toFixed(2)}` : currentPremium.toFixed(2);
+            elements.currentPremium.style.color = getPremiumColor(currentPremium);
+            elements.currentPrice.textContent = `₹${currentPrice.toFixed(2)}`;
+            elements.currentNav.textContent = `₹${currentNav.toFixed(2)}`;
+
+            // Premium status
+            const status = getPremiumStatus(currentPremium);
+            elements.premiumStatus.textContent = status.text;
+            elements.premiumStatus.className = `mt-2 text-sm ${status.class}`;
+
+            // Update card border color based on premium
+            const borderColor = getPremiumColor(currentPremium);
+            elements.currentPremiumCard.style.borderLeftWidth = '4px';
+            elements.currentPremiumCard.style.borderLeftColor = borderColor;
+
+            // Statistics
+            elements.statMin.textContent = formatPremium(data.stats.min);
+            elements.statMax.textContent = formatPremium(data.stats.max);
+            elements.statAvg.textContent = formatPremium(data.stats.average);
+            elements.statMedian.textContent = formatPremium(data.stats.median);
+            elements.statP25.textContent = formatPremium(data.stats.p25);
+            elements.statP75.textContent = formatPremium(data.stats.p75);
+        }
+
+        // Fetch data
+        async function fetchData() {
+            try {
+                const response = await fetch('premium_data.json');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                throw error;
+            }
+        }
+
+        // Initialize app
+        async function init() {
+            loadTheme();
+
+            try {
+                premiumData = await fetchData();
+
+                // Hide loading, show content
+                elements.loading.classList.add('hidden');
+                elements.content.classList.remove('hidden');
+
+                // Update UI
+                updateUI(premiumData);
+
+                // Initialize chart
+                initChart(premiumData);
+
+                // Setup event listeners
+                elements.themeToggle.addEventListener('click', toggleTheme);
+
+                elements.resetZoom.addEventListener('click', () => {
+                    chart.resetZoom();
+                });
+
+                elements.rangeButtons.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        updateChartRange(btn.dataset.range);
+                    });
+                });
+
+            } catch (error) {
+                elements.loading.classList.add('hidden');
+                elements.error.classList.remove('hidden');
+                elements.errorMessage.textContent = error.message || 'Failed to load data. Please try refreshing the page.';
+            }
+        }
+
+        // Start the app
+        init();
+    </script>
+</body>
+</html>
