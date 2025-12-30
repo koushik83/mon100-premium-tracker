@@ -9,7 +9,9 @@ Data Sources:
 - USDINR forex rates: Yahoo Finance
 
 Premium Calculation:
-- Adjusted iNAV = Official NAV × (Current day USDINR / NAV day USDINR)
+For international ETFs, NAV is typically calculated using previous day's US market close.
+So we adjust the NAV for forex movement:
+- Adjusted iNAV = NAV × (Current day USDINR / Previous day USDINR)
 - Premium % = ((Market Price - Adjusted iNAV) / Adjusted iNAV) × 100
 """
 
@@ -19,21 +21,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import sys
 
 
 def fetch_mon100_prices(start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetch MON100.NS daily closing prices from Yahoo Finance.
-
-    Args:
-        start_date: Start date in 'YYYY-MM-DD' format
-        end_date: End date in 'YYYY-MM-DD' format
-
-    Returns:
-        DataFrame with Date index and Close price column
-    """
+    """Fetch MON100.NS daily closing prices from Yahoo Finance."""
     print(f"Fetching MON100.NS prices from {start_date} to {end_date}...")
 
     try:
@@ -43,10 +36,8 @@ def fetch_mon100_prices(start_date: str, end_date: str) -> pd.DataFrame:
         if df.empty:
             raise ValueError("No price data returned for MON100.NS")
 
-        # Keep only Close price and reset index
         df = df[['Close']].copy()
-        df.index = df.index.tz_localize(None)  # Remove timezone info
-        df.index = df.index.normalize()  # Normalize to date only
+        df.index = df.index.tz_localize(None).normalize()
         df.columns = ['price']
 
         print(f"  Retrieved {len(df)} price records")
@@ -58,15 +49,7 @@ def fetch_mon100_prices(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def fetch_nav_data(scheme_code: int = 114984) -> pd.DataFrame:
-    """
-    Fetch NAV data from mfapi.in API.
-
-    Args:
-        scheme_code: Mutual fund scheme code (default: 114984 for Motilal NASDAQ 100)
-
-    Returns:
-        DataFrame with Date index and NAV column
-    """
+    """Fetch NAV data from mfapi.in API."""
     url = f"https://api.mfapi.in/mf/{scheme_code}"
     print(f"Fetching NAV data from {url}...")
 
@@ -78,15 +61,14 @@ def fetch_nav_data(scheme_code: int = 114984) -> pd.DataFrame:
         if 'data' not in data:
             raise ValueError("Invalid API response - 'data' field missing")
 
-        # Parse NAV data - format is: {"date": "25-12-2024", "nav": "123.45"}
         nav_records = []
         for record in data['data']:
             try:
                 date = datetime.strptime(record['date'], '%d-%m-%Y')
                 nav = float(record['nav'])
                 nav_records.append({'date': date, 'nav': nav})
-            except (ValueError, KeyError) as e:
-                continue  # Skip malformed records
+            except (ValueError, KeyError):
+                continue
 
         df = pd.DataFrame(nav_records)
         df.set_index('date', inplace=True)
@@ -101,16 +83,7 @@ def fetch_nav_data(scheme_code: int = 114984) -> pd.DataFrame:
 
 
 def fetch_usdinr_rates(start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetch USDINR forex rates from Yahoo Finance.
-
-    Args:
-        start_date: Start date in 'YYYY-MM-DD' format
-        end_date: End date in 'YYYY-MM-DD' format
-
-    Returns:
-        DataFrame with Date index and forex rate column
-    """
+    """Fetch USDINR forex rates from Yahoo Finance."""
     print(f"Fetching USDINR rates from {start_date} to {end_date}...")
 
     try:
@@ -120,10 +93,8 @@ def fetch_usdinr_rates(start_date: str, end_date: str) -> pd.DataFrame:
         if df.empty:
             raise ValueError("No forex data returned for USDINR=X")
 
-        # Keep only Close price
         df = df[['Close']].copy()
-        df.index = df.index.tz_localize(None)
-        df.index = df.index.normalize()
+        df.index = df.index.tz_localize(None).normalize()
         df.columns = ['usdinr']
 
         print(f"  Retrieved {len(df)} forex records")
@@ -142,79 +113,87 @@ def calculate_premium(
     """
     Calculate premium for each trading day.
 
-    Premium calculation:
-    1. Adjusted iNAV = Official NAV × (Current day USDINR / NAV day USDINR)
-    2. Premium % = ((Market Price - Adjusted iNAV) / Adjusted iNAV) × 100
+    The NAV for international funds like MON100 is typically:
+    - Published after Indian market close
+    - Based on previous US trading day's prices
+    - Converted to INR using that day's forex rate
 
-    Args:
-        prices_df: DataFrame with 'price' column
-        nav_df: DataFrame with 'nav' column
-        forex_df: DataFrame with 'usdinr' column
-
-    Returns:
-        DataFrame with all data merged and premium calculated
+    For accurate premium calculation, we need to adjust NAV for
+    forex movement between NAV date and current trading date.
     """
     print("Calculating premium...")
 
-    # Create a copy of prices as the base
-    result = prices_df.copy()
-
-    # Forward-fill NAV to get the latest available NAV for each price date
-    # (NAV is published with a delay, so we use the most recent available)
-    nav_reindexed = nav_df.reindex(result.index, method='ffill')
-    result['nav'] = nav_reindexed['nav']
-
-    # Get USDINR for each date (forward-fill for missing dates)
-    forex_reindexed = forex_df.reindex(result.index, method='ffill')
-    result['usdinr'] = forex_reindexed['usdinr']
-
-    # Get the USDINR rate on the day the NAV was calculated
-    # We need to find which NAV date corresponds to each row
-    nav_dates = nav_df.index.to_series()
-
-    # For each price date, find the corresponding NAV date
-    result['nav_date'] = pd.NaT
-    for idx in result.index:
-        # Find the most recent NAV date on or before the price date
-        nav_mask = nav_dates.index <= idx
-        if nav_mask.any():
-            result.loc[idx, 'nav_date'] = nav_dates[nav_mask].index[-1]
-
-    # Get USDINR on NAV date (forward-fill to handle weekends/holidays)
-    forex_all = forex_df.reindex(
-        pd.date_range(start=forex_df.index.min(), end=forex_df.index.max()),
-        method='ffill'
+    # Create complete date range and forward-fill forex rates
+    all_dates = pd.date_range(
+        start=min(prices_df.index.min(), nav_df.index.min(), forex_df.index.min()),
+        end=max(prices_df.index.max(), nav_df.index.max(), forex_df.index.max())
     )
+    forex_complete = forex_df.reindex(all_dates, method='ffill')
 
-    result['usdinr_nav_day'] = result['nav_date'].apply(
-        lambda x: forex_all.loc[x, 'usdinr'] if pd.notna(x) and x in forex_all.index else np.nan
-    )
+    # Build result dataframe
+    results = []
 
-    # Drop rows with missing data
-    result = result.dropna(subset=['price', 'nav', 'usdinr', 'usdinr_nav_day'])
+    for price_date in prices_df.index:
+        price = prices_df.loc[price_date, 'price']
 
-    # Calculate adjusted iNAV
-    # Adjusted iNAV = NAV × (Current USDINR / NAV day USDINR)
-    result['adjusted_inav'] = result['nav'] * (result['usdinr'] / result['usdinr_nav_day'])
+        # Find the most recent NAV on or before this date
+        nav_dates_before = nav_df.index[nav_df.index <= price_date]
+        if len(nav_dates_before) == 0:
+            continue
 
-    # Calculate premium percentage
-    result['premium'] = ((result['price'] - result['adjusted_inav']) / result['adjusted_inav']) * 100
+        nav_date = nav_dates_before[-1]
+        nav = nav_df.loc[nav_date, 'nav']
 
-    print(f"  Calculated premium for {len(result)} trading days")
+        # Get forex rates
+        if price_date not in forex_complete.index or nav_date not in forex_complete.index:
+            continue
 
-    return result
+        usdinr_today = forex_complete.loc[price_date, 'usdinr']
+        usdinr_nav_day = forex_complete.loc[nav_date, 'usdinr']
+
+        if pd.isna(usdinr_today) or pd.isna(usdinr_nav_day) or usdinr_nav_day == 0:
+            continue
+
+        # Calculate adjusted iNAV
+        # If forex went up since NAV date, the underlying is worth more in INR
+        forex_adjustment = usdinr_today / usdinr_nav_day
+        adjusted_inav = nav * forex_adjustment
+
+        # Calculate premium
+        premium = ((price - adjusted_inav) / adjusted_inav) * 100
+
+        results.append({
+            'date': price_date,
+            'price': price,
+            'nav': nav,
+            'nav_date': nav_date,
+            'usdinr': usdinr_today,
+            'usdinr_nav_day': usdinr_nav_day,
+            'forex_adj': forex_adjustment,
+            'adjusted_inav': adjusted_inav,
+            'premium': premium
+        })
+
+    result_df = pd.DataFrame(results)
+    result_df.set_index('date', inplace=True)
+
+    print(f"  Calculated premium for {len(result_df)} trading days")
+
+    # Debug: show some forex adjustments
+    if len(result_df) > 0:
+        print("\n  Sample forex adjustments (last 5 days):")
+        for i in range(-min(5, len(result_df)), 0):
+            row = result_df.iloc[i]
+            print(f"    {result_df.index[i].strftime('%Y-%m-%d')}: "
+                  f"NAV date={row['nav_date'].strftime('%Y-%m-%d')}, "
+                  f"FX adj={row['forex_adj']:.4f}, "
+                  f"Premium={row['premium']:.2f}%")
+
+    return result_df
 
 
 def calculate_statistics(premiums: pd.Series) -> Dict[str, float]:
-    """
-    Calculate statistical measures for the premium series.
-
-    Args:
-        premiums: Series of premium percentages
-
-    Returns:
-        Dictionary with statistical measures
-    """
+    """Calculate statistical measures for the premium series."""
     return {
         'min': round(premiums.min(), 2),
         'max': round(premiums.max(), 2),
@@ -228,15 +207,8 @@ def calculate_statistics(premiums: pd.Series) -> Dict[str, float]:
 
 
 def save_to_json(df: pd.DataFrame, stats: Dict[str, float], output_path: str) -> None:
-    """
-    Save the data to a JSON file for the web frontend.
-
-    Args:
-        df: DataFrame with all calculated data
-        stats: Dictionary with statistical measures
-        output_path: Path to save the JSON file
-    """
-    print(f"Saving data to {output_path}...")
+    """Save the data to a JSON file for the web frontend."""
+    print(f"\nSaving data to {output_path}...")
 
     output = {
         'dates': [d.strftime('%Y-%m-%d') for d in df.index],
@@ -266,7 +238,7 @@ def main():
 
     # Calculate date range (2 years from today)
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=730)  # ~2 years
+    start_date = end_date - timedelta(days=730)
 
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
@@ -308,7 +280,6 @@ def main():
         print(f"  25th %:   {stats['p25']:.2f}%")
         print(f"  75th %:   {stats['p75']:.2f}%")
         print(f"  Std Dev:  {stats['std']:.2f}%")
-        print()
 
         # Save to JSON
         save_to_json(result_df, stats, 'premium_data.json')
