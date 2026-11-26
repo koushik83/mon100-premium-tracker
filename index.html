@@ -597,6 +597,17 @@
                 hour: '2-digit',
                 minute: '2-digit'
             })}`;
+            // Which session the numbers are for, and a warning if it's old
+            if (data.latest_date) {
+                const fmt = d => new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const navDate = data.nav_dates ? data.nav_dates[data.nav_dates.length - 1] : null;
+                elements.lastUpdated.textContent += ` · Price of ${fmt(data.latest_date)}` +
+                    (navDate ? ` vs NAV of ${fmt(navDate)}` : '');
+                if (data.stale) {
+                    elements.lastUpdated.textContent += ' · ⚠️ STALE: price data is missing recent days';
+                    elements.lastUpdated.style.color = '#f59e0b';
+                }
+            }
 
             // Current values
             const currentPremium = data.stats.current;

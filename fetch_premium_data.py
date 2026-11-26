@@ -9,10 +9,15 @@ Data Sources:
 - USDINR forex rates: Yahoo Finance
 
 Premium Calculation:
-For international ETFs, NAV is typically calculated using previous day's US market close.
-So we adjust the NAV for forex movement:
-- Adjusted iNAV = NAV × (Current day USDINR / Previous day USDINR)
-- Premium % = ((Market Price - Adjusted iNAV) / Adjusted iNAV) × 100
+The AMFI NAV dated D is struck on the US close of D, which happens ~02:30 IST on
+D+1 -- after MON100 has finished trading in India on D. So the price on D must
+be compared with the latest NAV dated strictly BEFORE D (what the market
+actually knew), adjusted for the rupee's move since then:
+- Adjusted iNAV = NAV(prev) x (USDINR on D / USDINR on NAV date)
+- Premium % = ((Market Price - Adjusted iNAV) / Adjusted iNAV) x 100
+
+Alerts (Telegram, optional): BUY_BELOW / RICH_ABOVE premium zones and stale
+data. Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; skipped if unset.
 """
 
 import json
@@ -22,30 +27,45 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import os
 import sys
+
+BUY_BELOW = float(os.environ.get("BUY_BELOW", "5"))     # premium % at/below = buy window
+RICH_ABOVE = float(os.environ.get("RICH_ABOVE", "30"))  # premium % at/above = very rich
+STALE_BDAYS = 2  # tolerate one holiday / one missing Yahoo day
+STATE_FILE = "alert_state.json"
+DASHBOARD = "https://koushik83.github.io/mon100-premium-tracker/"
+
+
+def _closes(symbol: str, start_date: str, end_date: str) -> pd.Series:
+    try:
+        df = yf.Ticker(symbol).history(start=start_date, end=end_date, auto_adjust=True)
+    except Exception as e:
+        print(f"  {symbol}: fetch failed ({e})")
+        return pd.Series(dtype=float)
+    if df.empty:
+        return pd.Series(dtype=float)
+    s = df['Close'].copy()
+    s.index = s.index.tz_localize(None).normalize()
+    return s[~s.index.duplicated(keep='last')]
 
 
 def fetch_mon100_prices(start_date: str, end_date: str) -> pd.DataFrame:
-    """Fetch MON100.NS daily closing prices from Yahoo Finance."""
-    print(f"Fetching MON100.NS prices from {start_date} to {end_date}...")
-
-    try:
-        ticker = yf.Ticker("MON100.NS")
-        df = ticker.history(start=start_date, end=end_date, auto_adjust=True)
-
-        if df.empty:
-            raise ValueError("No price data returned for MON100.NS")
-
-        df = df[['Close']].copy()
-        df.index = df.index.tz_localize(None).normalize()
-        df.columns = ['price']
-
-        print(f"  Retrieved {len(df)} price records")
-        return df
-
-    except Exception as e:
-        print(f"Error fetching MON100.NS prices: {e}")
-        raise
+    """MON100 daily closes: NSE from Yahoo, with BSE filling any days NSE is missing."""
+    print(f"Fetching MON100 prices from {start_date} to {end_date}...")
+    nse = _closes("MON100.NS", start_date, end_date)
+    bse = _closes("MON100.BO", start_date, end_date)
+    if nse.empty and bse.empty:
+        raise ValueError("No price data returned for MON100.NS or MON100.BO")
+    filled = bse[~bse.index.isin(nse.index)]
+    if len(filled):
+        print(f"  BSE filled {len(filled)} day(s) missing on NSE: "
+              f"{', '.join(d.strftime('%Y-%m-%d') for d in filled.index[-5:])}")
+    df = pd.concat([nse, filled]).sort_index().to_frame('price')
+    # Drop an in-progress session: its "close" is just the latest intraday tick.
+    df = df[df.index <= last_closed_session()]
+    print(f"  Retrieved {len(df)} price records")
+    return df
 
 
 def fetch_nav_data(scheme_code: int = 114984) -> pd.DataFrame:
@@ -136,8 +156,9 @@ def calculate_premium(
     for price_date in prices_df.index:
         price = prices_df.loc[price_date, 'price']
 
-        # Find the most recent NAV on or before this date
-        nav_dates_before = nav_df.index[nav_df.index <= price_date]
+        # Latest NAV dated strictly before this trading day: NAV(D) uses the
+        # US close of D, which happens after Indian trading on D is over.
+        nav_dates_before = nav_df.index[nav_df.index < price_date]
         if len(nav_dates_before) == 0:
             continue
 
@@ -217,7 +238,10 @@ def save_to_json(df: pd.DataFrame, stats: Dict[str, float], output_path: str) ->
         'navs': [round(n, 2) for n in df['nav'].tolist()],
         'adjusted_inavs': [round(i, 2) for i in df['adjusted_inav'].tolist()],
         'usdinr': [round(u, 4) for u in df['usdinr'].tolist()],
+        'nav_dates': [d.strftime('%Y-%m-%d') for d in df['nav_date']],
         'stats': stats,
+        'latest_date': df.index[-1].strftime('%Y-%m-%d'),
+        'stale': is_stale(df.index[-1]),
         'last_updated': datetime.now().isoformat(),
         'data_points': len(df)
     }
@@ -226,6 +250,94 @@ def save_to_json(df: pd.DataFrame, stats: Dict[str, float], output_path: str) ->
         json.dump(output, f, indent=2)
 
     print(f"  Saved {len(df)} data points")
+
+
+def now_ist() -> pd.Timestamp:
+    return pd.Timestamp.utcnow().tz_localize(None) + pd.Timedelta(hours=5, minutes=30)
+
+
+def last_closed_session() -> pd.Timestamp:
+    """Most recent weekday whose NSE session has closed (15:30 IST + buffer)."""
+    n = now_ist()
+    day = n.normalize()
+    if n < day + pd.Timedelta(hours=15, minutes=45):
+        day -= pd.Timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= pd.Timedelta(days=1)
+    return day
+
+
+def is_stale(latest: pd.Timestamp) -> bool:
+    """True if more than STALE_BDAYS weekday sessions after `latest` are missing.
+    Holidays count as missing, hence the tolerance."""
+    missing = np.busday_count((latest + pd.Timedelta(days=1)).date(),
+                              (last_closed_session() + pd.Timedelta(days=1)).date())
+    return int(missing) > STALE_BDAYS
+
+
+def send_telegram(text: str) -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat:
+        print("---- Telegram (not sent, secrets unset) ----\n" + text)
+        return
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
+                          data={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                "disable_web_page_preview": "true"})
+        print("Telegram sent." if r.ok else f"Telegram error {r.status_code}")
+    except requests.RequestException as e:  # never echo the URL: it contains the token
+        print(f"Telegram send failed: {type(e).__name__}")
+
+
+def zone_of(premium: float) -> str:
+    if premium <= BUY_BELOW:
+        return "buy"
+    if premium >= RICH_ABOVE:
+        return "rich"
+    return "normal"
+
+
+def notify(df: pd.DataFrame, stats: Dict[str, float]) -> None:
+    """Alert on premium-zone changes and on stale data. State lives in alert_state.json."""
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+
+    last = df.iloc[-1]
+    date = df.index[-1].strftime('%d %b %Y')
+    prem = float(last['premium'])
+    zone = zone_of(prem)
+    detail = (f"Price ₹{last['price']:.2f} vs iNAV ₹{last['adjusted_inav']:.2f} "
+              f"(NAV of {last['nav_date']:%d %b})\n"
+              f"2y median {stats['median']:.1f}% · p25 {stats['p25']:.1f}% · p75 {stats['p75']:.1f}%\n"
+              f"{DASHBOARD}")
+
+    prev_zone = state.get("zone")
+    if prev_zone is None:
+        print(f"Alert state initialised: zone={zone} ({prem:.2f}%)")
+    elif zone != prev_zone:
+        head = {"buy": f"📉 <b>MON100 premium in BUY zone: {prem:.1f}%</b> (≤ {BUY_BELOW:g}%)",
+                "rich": f"📈 <b>MON100 premium very RICH: {prem:.1f}%</b> (≥ {RICH_ABOVE:g}%)",
+                "normal": f"↔️ <b>MON100 premium back to normal: {prem:.1f}%</b>"}[zone]
+        send_telegram(f"{head}\n{date}\n\n{detail}")
+    state["zone"] = zone
+
+    latest = df.index[-1].strftime('%Y-%m-%d')
+    if is_stale(df.index[-1]):
+        if state.get("stale_alerted_for") != latest:
+            send_telegram(f"⚠️ <b>MON100 tracker data is stale</b>\nLatest price is from {date}. "
+                          f"Yahoo may be missing days.\n"
+                          f"https://github.com/koushik83/mon100-premium-tracker/actions")
+            state["stale_alerted_for"] = latest
+    else:
+        state.pop("stale_alerted_for", None)
+
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
 
 
 def main():
@@ -241,7 +353,9 @@ def main():
     start_date = end_date - timedelta(days=730)
 
     start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
+    # yfinance's `end` is exclusive: +1 day so today's close is included. (The
+    # Actions run lands ~20:00 UTC, so `end=today` silently dropped that day.)
+    end_str = (end_date + timedelta(days=1)).strftime('%Y-%m-%d')
 
     print(f"Date Range: {start_str} to {end_str}")
     print()
@@ -283,6 +397,7 @@ def main():
 
         # Save to JSON
         save_to_json(result_df, stats, 'premium_data.json')
+        notify(result_df, stats)
 
         print()
         print("Data fetch complete!")

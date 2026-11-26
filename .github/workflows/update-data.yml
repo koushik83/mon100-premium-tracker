@@ -1,26 +1,33 @@
 name: Update Premium Data
 
 on:
-  # Run daily at 4:30 PM IST (11:00 AM UTC) - after Indian market closes
+  # 4:30 PM IST (11:00 UTC), after NSE close. GitHub often starts scheduled
+  # runs hours late; the script handles that (it includes today's close and
+  # drops an unfinished session).
   schedule:
     - cron: '0 11 * * 1-5'  # Monday to Friday
 
-  # Allow manual trigger
   workflow_dispatch:
 
-  # Run on push to main branch (for initial deployment)
   push:
     branches:
       - main
     paths:
       - 'fetch_premium_data.py'
 
+# Never let two runs race on premium_data.json / alert_state.json.
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
 permissions:
   contents: write
+  actions: write   # keepalive
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -38,33 +45,47 @@ jobs:
 
       - name: Fetch premium data
         run: python fetch_premium_data.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONIOENCODING: utf-8
+          # Premium zones for Telegram alerts (percent)
+          BUY_BELOW: '5'
+          RICH_ABOVE: '30'
 
       - name: Commit and push if changed
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-
-          # Check if there are changes
-          if git diff --quiet premium_data.json; then
-            echo "No changes to premium_data.json"
+          git add premium_data.json alert_state.json
+          if git diff --cached --quiet; then
+            echo "No changes"
           else
-            git add premium_data.json
             git commit -m "Update premium data - $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git pull --rebase origin main
             git push
           fi
 
       - name: Summary
         run: |
           echo "## Data Update Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f premium_data.json ]; then
-            echo "✅ Premium data updated successfully" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Last Updated:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            # Extract current premium from JSON
-            CURRENT=$(python -c "import json; data=json.load(open('premium_data.json')); print(f\"{data['stats']['current']:.2f}%\")")
-            echo "**Current Premium:** ${CURRENT}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Failed to generate premium_data.json" >> $GITHUB_STEP_SUMMARY
-          fi
+          CURRENT=$(python -c "import json; d=json.load(open('premium_data.json')); print(f\"{d['stats']['current']:.2f}% (price of {d.get('latest_date','?')})\")")
+          echo "**Current Premium:** ${CURRENT}" >> $GITHUB_STEP_SUMMARY
+
+      # If yfinance/mfapi break, the run fails; tell Telegram, not just email.
+      - name: Alert on failure
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && curl -s -o /dev/null "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=⚠️ MON100 premium tracker run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+
+      # GitHub disables cron workflows after 60 days without repo activity.
+      - name: Keepalive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update-data.yml/enable" || true
