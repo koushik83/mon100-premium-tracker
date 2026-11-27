@@ -45,7 +45,9 @@ def _closes(symbol: str, start_date: str, end_date: str) -> pd.Series:
         return pd.Series(dtype=float)
     if df.empty:
         return pd.Series(dtype=float)
-    s = df['Close'].copy()
+    # Yahoo sometimes returns a row with a blank (NaN) close, e.g. for the
+    # latest session; drop it so the other exchange can fill the day instead.
+    s = df['Close'].dropna().copy()
     s.index = s.index.tz_localize(None).normalize()
     return s[~s.index.duplicated(keep='last')]
 
@@ -182,6 +184,8 @@ def calculate_premium(
 
         # Calculate premium
         premium = ((price - adjusted_inav) / adjusted_inav) * 100
+        if not np.isfinite(premium):
+            continue
 
         results.append({
             'date': price_date,
@@ -246,8 +250,12 @@ def save_to_json(df: pd.DataFrame, stats: Dict[str, float], output_path: str) ->
         'data_points': len(df)
     }
 
+    # allow_nan=False: NaN is not valid JSON and breaks the dashboard. Serialise
+    # first, so on failure the previous good file is left untouched and the
+    # run fails (-> Telegram failure alert) instead of publishing garbage.
+    text = json.dumps(output, indent=2, allow_nan=False)
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(output, f, indent=2)
+        f.write(text)
 
     print(f"  Saved {len(df)} data points")
 
