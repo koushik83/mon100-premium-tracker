@@ -1,13 +1,15 @@
 name: Update Premium Data
 
 on:
-  # 4:30 PM IST (11:00 UTC), after NSE close. GitHub often starts scheduled
-  # runs hours late; the script handles that (it includes today's close and
-  # drops an unfinished session).
+  # One Telegram update per trading day, after the NSE close. GitHub's cron
+  # is best-effort (it often runs hours late or skips slots, worst at :00), so
+  # this fires hourly at :47 UTC = :17 IST, 16:17-23:17 IST, Mon-Fri, purely as
+  # retries: the first run after 16:00 IST does the work and sends the update;
+  # every later run that day exits in a second.
   schedule:
-    - cron: '0 11 * * 1-5'  # Monday to Friday
+    - cron: '47 10-17 * * 1-5'
 
-  workflow_dispatch:
+  workflow_dispatch:   # manual run = fetch + send now (--force)
 
   push:
     branches:
@@ -44,7 +46,7 @@ jobs:
           pip install yfinance requests pandas numpy
 
       - name: Fetch premium data
-        run: python fetch_premium_data.py
+        run: python fetch_premium_data.py ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -84,6 +86,8 @@ jobs:
             --data-urlencode "text=⚠️ MON100 premium tracker run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
 
       # GitHub disables cron workflows after 60 days without repo activity.
+      # The daily data commit already counts as activity; this re-enable call
+      # is a second guard in case commits ever stop (e.g. a long Yahoo outage).
       - name: Keepalive
         if: always()
         env:

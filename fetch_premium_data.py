@@ -16,8 +16,9 @@ actually knew), adjusted for the rupee's move since then:
 - Adjusted iNAV = NAV(prev) x (USDINR on D / USDINR on NAV date)
 - Premium % = ((Market Price - Adjusted iNAV) / Adjusted iNAV) x 100
 
-Alerts (Telegram, optional): BUY_BELOW / RICH_ABOVE premium zones and stale
-data. Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; skipped if unset.
+Telegram (optional): one update per trading day after the NSE close, flagging
+BUY_BELOW / RICH_ABOVE zone changes and stale data. Needs TELEGRAM_BOT_TOKEN and
+TELEGRAM_CHAT_ID. `--force` runs and sends regardless of time or day.
 """
 
 import json
@@ -33,6 +34,8 @@ import sys
 BUY_BELOW = float(os.environ.get("BUY_BELOW", "5"))     # premium % at/below = buy window
 RICH_ABOVE = float(os.environ.get("RICH_ABOVE", "30"))  # premium % at/above = very rich
 STALE_BDAYS = 2  # tolerate one holiday / one missing Yahoo day
+SEND_FROM_HOUR_IST = 16  # daily update: first run after NSE close (15:30)...
+SEND_BY_HOUR_IST = 20    # ...waits for today's close on Yahoo until this hour
 STATE_FILE = "alert_state.json"
 DASHBOARD = "https://koushik83.github.io/mon100-premium-tracker/"
 
@@ -283,19 +286,21 @@ def is_stale(latest: pd.Timestamp) -> bool:
     return int(missing) > STALE_BDAYS
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str) -> bool:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat:
         print("---- Telegram (not sent, secrets unset) ----\n" + text)
-        return
+        return False
     try:
         r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=30,
                           data={"chat_id": chat, "text": text, "parse_mode": "HTML",
                                 "disable_web_page_preview": "true"})
         print("Telegram sent." if r.ok else f"Telegram error {r.status_code}")
+        return r.ok
     except requests.RequestException as e:  # never echo the URL: it contains the token
         print(f"Telegram send failed: {type(e).__name__}")
+        return False
 
 
 def zone_of(premium: float) -> str:
@@ -306,46 +311,46 @@ def zone_of(premium: float) -> str:
     return "normal"
 
 
-def notify(df: pd.DataFrame, stats: Dict[str, float]) -> None:
-    """Alert on premium-zone changes and on stale data. State lives in alert_state.json."""
+def load_state() -> dict:
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
-            state = json.load(f)
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
+        return {}
 
-    last = df.iloc[-1]
-    date = df.index[-1].strftime('%d %b %Y')
-    prem = float(last['premium'])
-    zone = zone_of(prem)
-    detail = (f"Price ₹{last['price']:.2f} vs iNAV ₹{last['adjusted_inav']:.2f} "
-              f"(NAV of {last['nav_date']:%d %b})\n"
-              f"2y median {stats['median']:.1f}% · p25 {stats['p25']:.1f}% · p75 {stats['p75']:.1f}%\n"
-              f"{DASHBOARD}")
 
-    prev_zone = state.get("zone")
-    if prev_zone is None:
-        print(f"Alert state initialised: zone={zone} ({prem:.2f}%)")
-    elif zone != prev_zone:
-        head = {"buy": f"📉 <b>MON100 premium in BUY zone: {prem:.1f}%</b> (≤ {BUY_BELOW:g}%)",
-                "rich": f"📈 <b>MON100 premium very RICH: {prem:.1f}%</b> (≥ {RICH_ABOVE:g}%)",
-                "normal": f"↔️ <b>MON100 premium back to normal: {prem:.1f}%</b>"}[zone]
-        send_telegram(f"{head}\n{date}\n\n{detail}")
-    state["zone"] = zone
-
-    latest = df.index[-1].strftime('%Y-%m-%d')
-    if is_stale(df.index[-1]):
-        if state.get("stale_alerted_for") != latest:
-            send_telegram(f"⚠️ <b>MON100 tracker data is stale</b>\nLatest price is from {date}. "
-                          f"Yahoo may be missing days.\n"
-                          f"https://github.com/koushik83/mon100-premium-tracker/actions")
-            state["stale_alerted_for"] = latest
-    else:
-        state.pop("stale_alerted_for", None)
-
+def save_state(state: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
+
+
+def daily_message(df: pd.DataFrame, stats: Dict[str, float], prev_zone) -> str:
+    last = df.iloc[-1]
+    prem = float(last['premium'])
+    zone = zone_of(prem)
+    label = {"buy": "🟢 BUY zone", "rich": "🔴 very rich", "normal": "🟡 normal"}[zone]
+    lines = []
+    if prev_zone and zone != prev_zone:
+        lines += [{"buy": f"📉 <b>Entered BUY zone (≤ {BUY_BELOW:g}%)</b>",
+                   "rich": f"📈 <b>Entered very-RICH zone (≥ {RICH_ABOVE:g}%)</b>",
+                   "normal": "↔️ <b>Back to the normal zone</b>"}[zone], ""]
+    lines.append(f"🇺🇸 <b>MON100 premium: {prem:.1f}%</b> · {label}")
+    lines.append(f"<i>Close of {df.index[-1]:%a %d %b}</i>")
+    if len(df) > 1:
+        prev = df.iloc[-2]
+        lines.append(f"vs {df.index[-2]:%d %b}: {prem - prev['premium']:+.1f} pts (was {prev['premium']:.1f}%)")
+    recent = " → ".join(f"{p:.1f}" for p in df['premium'].iloc[-5:])
+    lines.append(f"Last 5 days: {recent}")
+    lines.append("")
+    lines.append(f"Price ₹{last['price']:.2f} vs iNAV ₹{last['adjusted_inav']:.2f} (NAV of {last['nav_date']:%d %b})")
+    pct = (df['premium'] < prem).mean() * 100
+    lines.append(f"2y: median {stats['median']:.1f}% · p25 {stats['p25']:.1f}% · p75 {stats['p75']:.1f}%")
+    lines.append(f"Higher than {pct:.0f}% of days in the last 2 years")
+    if is_stale(df.index[-1]):
+        lines += ["", "⚠️ Price data is missing recent days (Yahoo); numbers may be old."]
+    lines += ["", DASHBOARD]
+    return "\n".join(lines)
 
 
 def main():
@@ -355,6 +360,23 @@ def main():
     print("MON100 Premium Tracker - Data Fetcher")
     print("=" * 60)
     print()
+
+    # One run (and one Telegram message) per trading day. The workflow fires
+    # hourly only as retries, because GitHub's cron silently skips runs; every
+    # run after today's message has gone out exits here in a second.
+    force = "--force" in sys.argv
+    state = load_state()
+    today = now_ist().strftime('%Y-%m-%d')
+    if not force:
+        if now_ist().weekday() >= 5:
+            print("Weekend -- nothing to do.")
+            return 0
+        if now_ist().hour < SEND_FROM_HOUR_IST:
+            print(f"Before {SEND_FROM_HOUR_IST}:00 IST -- nothing to do.")
+            return 0
+        if state.get("last_daily") == today:
+            print("Today's update already sent -- nothing to do.")
+            return 0
 
     # Calculate date range (2 years from today)
     end_date = datetime.now()
@@ -405,7 +427,22 @@ def main():
 
         # Save to JSON
         save_to_json(result_df, stats, 'premium_data.json')
-        notify(result_df, stats)
+
+        # Prefer to report with today's close; Yahoo can lag, so until
+        # SEND_BY_HOUR_IST we wait for a later hourly run if it isn't in yet.
+        # After that (or on holidays) send with the latest close we have.
+        latest = result_df.index[-1]
+        have_today = latest >= last_closed_session()
+        if force or have_today or now_ist().hour >= SEND_BY_HOUR_IST:
+            msg = daily_message(result_df, stats, state.get("zone"))
+            sent = send_telegram(msg)
+            state["zone"] = zone_of(float(result_df['premium'].iloc[-1]))
+            if sent:
+                state["last_daily"] = today
+            save_state(state)
+        else:
+            print(f"Today's close not on Yahoo yet (latest {latest:%Y-%m-%d}); "
+                  f"will retry next run, sending by {SEND_BY_HOUR_IST}:00 IST regardless.")
 
         print()
         print("Data fetch complete!")
